@@ -2,79 +2,200 @@
 import cv2
 import numpy as np
 import matplotlib.pyplot as plt
-from skimage.feature import hog, local_binary_pattern
-from sklearn.cluster import KMeans
 import os
 import random
 
-def get_sift_features(img_gray):
-    # Initialize SIFT detector
-    try:
-        sift = cv2.SIFT_create()
-    except AttributeError:
-        print("SIFT_create not found (older OpenCV version or patent issue?). Using ORB.")
-        sift = cv2.ORB_create()
-        
-    keypoints, descriptors = sift.detectAndCompute(img_gray, None)
-    return keypoints, descriptors
-
-def get_hog_features(img_gray):
-    # Compute HOG descriptors
-    # We want valid descriptors for blocks to cluster them.
-    # pixels_per_cell=(16, 16), cells_per_block=(1, 1) gives us 1 feature vector per 16x16 cell
-    features, hog_image = hog(img_gray, orientations=9, pixels_per_cell=(16, 16),
-                                cells_per_block=(1, 1), visualize=True, feature_vector=False)
+def manual_lbp(img_gray, radius=1, n_points=8):
+    """
+    Manual Local Binary Pattern implementation.
+    """
+    height, width = img_gray.shape
+    lbp_img = np.zeros((height, width), dtype=np.uint8)
     
-    # features shape: (n_cells_y, n_cells_x, 1, 1, 9)
-    # We need to reshape to (n_samples, n_features)
-    n_y, n_x, _, _, n_feats = features.shape
-    features_flat = features.reshape(-1, n_feats)
-    
-    # Create coordinates for plotting
-    coords = []
-    for y in range(n_y):
-        for x in range(n_x):
-            # Center of the 16x16 cell
-            cy = y * 16 + 8
-            cx = x * 16 + 8
-            coords.append([cx, cy])
+    # For each pixel (excluding border)
+    for y in range(radius, height - radius):
+        for x in range(radius, width - radius):
+            center = img_gray[y, x]
+            binary_code = 0
             
-    return np.array(coords), features_flat, hog_image
+            # Sample points around the center
+            for i in range(n_points):
+                angle = 2 * np.pi * i / n_points
+                px = x + int(round(radius * np.cos(angle)))
+                py = y - int(round(radius * np.sin(angle)))
+                
+                # Compare with center
+                if img_gray[py, px] >= center:
+                    binary_code |= (1 << i)
+            
+            lbp_img[y, x] = binary_code
+    
+    return lbp_img
 
-def get_lbp_features(img_gray):
-    # LBP returns an image of the same size. 
-    # To cluster, we can take patch-wise histograms of LBP codes? 
-    # Or just use the LBP value of each pixel as a 1D feature (weak)?
-    # Better: Compute LBP image, then take 16x16 blocks and compute histograms of LBP codes.
-    radius = 3
-    n_points = 8 * radius
-    lbp = local_binary_pattern(img_gray, n_points, radius, method='uniform')
+def manual_hog(img_gray, cell_size=16, n_bins=9):
+    """
+    Manual Histogram of Oriented Gradients implementation.
+    """
+    height, width = img_gray.shape
+    img = img_gray.astype(np.float32)
     
-    # Divide into 16x16 patches
-    h, w = lbp.shape
-    step = 16
-    coords = []
+    # Compute gradients manually
+    gx = np.zeros_like(img)
+    gy = np.zeros_like(img)
+    
+    # Sobel-like gradient (simplified)
+    for y in range(1, height - 1):
+        for x in range(1, width - 1):
+            gx[y, x] = img[y, x + 1] - img[y, x - 1]
+            gy[y, x] = img[y + 1, x] - img[y - 1, x]
+    
+    # Compute magnitude and orientation
+    magnitude = np.sqrt(gx ** 2 + gy ** 2)
+    orientation = np.arctan2(gy, gx) * 180 / np.pi
+    orientation[orientation < 0] += 180  # Map to 0-180
+    
+    # Compute cell histograms
+    n_cells_y = height // cell_size
+    n_cells_x = width // cell_size
+    
     features = []
+    coords = []
     
-    for y in range(0, h - step + 1, step):
-        for x in range(0, w - step + 1, step):
-            patch = lbp[y:y+step, x:x+step]
-            hist, _ = np.histogram(patch.ravel(), bins=np.arange(0, n_points + 3), range=(0, n_points + 2))
-            hist = hist.astype("float")
-            if hist.sum() > 0:
-                hist /= (hist.sum() + 1e-7)
+    for cy in range(n_cells_y):
+        for cx in range(n_cells_x):
+            # Cell boundaries
+            y_start = cy * cell_size
+            x_start = cx * cell_size
+            
+            cell_mag = magnitude[y_start:y_start + cell_size, x_start:x_start + cell_size]
+            cell_ori = orientation[y_start:y_start + cell_size, x_start:x_start + cell_size]
+            
+            # Build histogram
+            hist = np.zeros(n_bins)
+            bin_width = 180 / n_bins
+            
+            for i in range(cell_size):
+                for j in range(cell_size):
+                    bin_idx = int(cell_ori[i, j] / bin_width) % n_bins
+                    hist[bin_idx] += cell_mag[i, j]
+            
+            # Normalize
+            norm = np.sqrt(np.sum(hist ** 2) + 1e-6)
+            hist = hist / norm
             
             features.append(hist)
-            coords.append([x + step//2, y + step//2])
-            
+            coords.append([x_start + cell_size // 2, y_start + cell_size // 2])
+    
     return np.array(coords), np.array(features)
+
+def manual_sift_keypoints(img_gray, threshold=0.03):
+    """
+    Simplified SIFT-like keypoint detection using DoG.
+    Returns keypoints and simple gradient-based descriptors.
+    """
+    height, width = img_gray.shape
+    img = img_gray.astype(np.float32) / 255.0
+    
+    # Create Gaussian blurred versions
+    sigma = 1.6
+    k = np.sqrt(2)
+    
+    def gaussian_blur(img, sigma):
+        # Simple box blur approximation
+        size = int(6 * sigma) | 1
+        kernel = np.ones((size, size)) / (size * size)
+        result = np.zeros_like(img)
+        pad = size // 2
+        padded = np.pad(img, pad, mode='reflect')
+        for y in range(height):
+            for x in range(width):
+                result[y, x] = np.sum(padded[y:y + size, x:x + size] * kernel)
+        return result
+    
+    g1 = gaussian_blur(img, sigma)
+    g2 = gaussian_blur(img, sigma * k)
+    
+    # Difference of Gaussians
+    dog = g2 - g1
+    
+    # Find local extrema
+    keypoints = []
+    descriptors = []
+    
+    for y in range(16, height - 16, 8):
+        for x in range(16, width - 16, 8):
+            patch = dog[y - 1:y + 2, x - 1:x + 2]
+            center = dog[y, x]
+            
+            if abs(center) > threshold:
+                if center == patch.max() or center == patch.min():
+                    keypoints.append([x, y])
+                    
+                    # Simple descriptor: gradient histogram around keypoint
+                    desc_patch = img[y - 8:y + 8, x - 8:x + 8]
+                    if desc_patch.shape == (16, 16):
+                        gx = np.diff(desc_patch, axis=1)
+                        gy = np.diff(desc_patch, axis=0)
+                        gx = gx[:15, :]
+                        gy = gy[:, :15]
+                        mag = np.sqrt(gx ** 2 + gy ** 2)
+                        desc = mag.flatten()[:128]
+                        if len(desc) == 128:
+                            desc = desc / (np.linalg.norm(desc) + 1e-6)
+                            descriptors.append(desc)
+                        else:
+                            keypoints.pop()
+    
+    return np.array(keypoints), np.array(descriptors) if descriptors else None
+
+def manual_kmeans(X, k, max_iters=100):
+    """
+    Manual K-Means clustering implementation.
+    """
+    n_samples, n_features = X.shape
+    
+    # Initialize centroids randomly
+    np.random.seed(42)
+    indices = np.random.choice(n_samples, k, replace=False)
+    centroids = X[indices].copy()
+    
+    labels = np.zeros(n_samples, dtype=int)
+    
+    for iteration in range(max_iters):
+        # Assign points to nearest centroid
+        for i in range(n_samples):
+            min_dist = float('inf')
+            for j in range(k):
+                dist = np.sum((X[i] - centroids[j]) ** 2)
+                if dist < min_dist:
+                    min_dist = dist
+                    labels[i] = j
+        
+        # Update centroids
+        new_centroids = np.zeros_like(centroids)
+        counts = np.zeros(k)
+        
+        for i in range(n_samples):
+            new_centroids[labels[i]] += X[i]
+            counts[labels[i]] += 1
+        
+        for j in range(k):
+            if counts[j] > 0:
+                new_centroids[j] /= counts[j]
+            else:
+                new_centroids[j] = centroids[j]
+        
+        # Check convergence
+        if np.allclose(centroids, new_centroids):
+            break
+        
+        centroids = new_centroids
+    
+    return labels, centroids
 
 def plot_clusters(img_rgb, coords, labels, k, title):
     plt.imshow(img_rgb)
-    # Get colors
     cmap = plt.get_cmap('tab10')
-    
-    # For SIFT/Points, coords are (x, y)
     plt.scatter(coords[:, 0], coords[:, 1], c=labels, cmap=cmap, s=20, alpha=0.7)
     plt.title(f"{title} (k={k})")
     plt.axis('off')
@@ -93,69 +214,81 @@ def main():
     print(f"Processing image: {image_name}")
     
     img_bgr = cv2.imread(image_path)
-    img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
-    img_rgb = cv2.resize(img_rgb, (256, 256))
-    img_gray = cv2.cvtColor(img_rgb, cv2.COLOR_RGB2GRAY)
+    img_rgb = img_bgr[:, :, ::-1].copy()  # Manual BGR to RGB
+    img_rgb = cv2.resize(img_rgb, (256, 256))  # Resize allowed for Q1/Q4 per assignment
+    img_gray = (0.299 * img_rgb[:, :, 0] + 0.587 * img_rgb[:, :, 1] + 0.114 * img_rgb[:, :, 2]).astype(np.uint8)
     
-    # 1. SIFT
-    print("Extracting SIFT...")
-    kp, des_sift = get_sift_features(img_gray)
+    # 1. Manual SIFT-like features
+    print("Extracting SIFT-like features (manual)...")
+    kp_coords, des_sift = manual_sift_keypoints(img_gray)
+    
     if des_sift is not None and len(des_sift) > 6:
-        sift_coords = np.array([p.pt for p in kp])
-        
-        # Cluster k=3
-        kmeans_sift_3 = KMeans(n_clusters=3, random_state=42).fit(des_sift)
-        
-        # Cluster k=6
-        kmeans_sift_6 = KMeans(n_clusters=6, random_state=42).fit(des_sift)
+        print(f"  Found {len(kp_coords)} keypoints")
+        labels_3, _ = manual_kmeans(des_sift, 3)
+        labels_6, _ = manual_kmeans(des_sift, 6)
         
         plt.figure(figsize=(10, 5))
         plt.subplot(1, 2, 1)
-        plot_clusters(img_rgb, sift_coords, kmeans_sift_3.labels_, 3, "SIFT Clusters")
+        plot_clusters(img_rgb, kp_coords, labels_3, 3, "SIFT Clusters")
         plt.subplot(1, 2, 2)
-        plot_clusters(img_rgb, sift_coords, kmeans_sift_6.labels_, 6, "SIFT Clusters")
-        plt.suptitle("SIFT Clustering")
+        plot_clusters(img_rgb, kp_coords, labels_6, 6, "SIFT Clusters")
+        plt.suptitle("SIFT Clustering (Manual)")
         plt.savefig('sift_clusters.png')
         print("Saved sift_clusters.png")
+    else:
+        print("  Not enough SIFT keypoints found")
 
-    # 2. HoG
-    print("Extracting HoG...")
-    hog_coords, des_hog, _ = get_hog_features(img_gray)
+    # 2. Manual HoG
+    print("Extracting HoG features (manual)...")
+    hog_coords, des_hog = manual_hog(img_gray)
+    
     if len(des_hog) > 6:
-        kmeans_hog_3 = KMeans(n_clusters=3, random_state=42).fit(des_hog)
-        kmeans_hog_6 = KMeans(n_clusters=6, random_state=42).fit(des_hog)
+        labels_3, _ = manual_kmeans(des_hog, 3)
+        labels_6, _ = manual_kmeans(des_hog, 6)
         
         plt.figure(figsize=(10, 5))
         plt.subplot(1, 2, 1)
-        plot_clusters(img_rgb, hog_coords, kmeans_hog_3.labels_, 3, "HoG Clusters")
+        plot_clusters(img_rgb, hog_coords, labels_3, 3, "HoG Clusters")
         plt.subplot(1, 2, 2)
-        plot_clusters(img_rgb, hog_coords, kmeans_hog_6.labels_, 6, "HoG Clusters")
-        plt.suptitle("HoG Clustering")
+        plot_clusters(img_rgb, hog_coords, labels_6, 6, "HoG Clusters")
+        plt.suptitle("HoG Clustering (Manual)")
         plt.savefig('hog_clusters.png')
         print("Saved hog_clusters.png")
 
-    # 3. LBP
-    print("Extracting LBP...")
-    lbp_coords, des_lbp = get_lbp_features(img_gray)
-    if len(des_lbp) > 6:
-        kmeans_lbp_3 = KMeans(n_clusters=3, random_state=42).fit(des_lbp)
-        kmeans_lbp_6 = KMeans(n_clusters=6, random_state=42).fit(des_lbp)
+    # 3. Manual LBP
+    print("Extracting LBP features (manual)...")
+    lbp_img = manual_lbp(img_gray, radius=1, n_points=8)
+    
+    # Extract patch histograms from LBP image
+    step = 16
+    lbp_coords = []
+    lbp_features = []
+    
+    for y in range(0, 256 - step, step):
+        for x in range(0, 256 - step, step):
+            patch = lbp_img[y:y + step, x:x + step]
+            hist = np.zeros(256)
+            for val in patch.flatten():
+                hist[val] += 1
+            hist = hist / (np.sum(hist) + 1e-6)
+            lbp_features.append(hist)
+            lbp_coords.append([x + step // 2, y + step // 2])
+    
+    lbp_coords = np.array(lbp_coords)
+    lbp_features = np.array(lbp_features)
+    
+    if len(lbp_features) > 6:
+        labels_3, _ = manual_kmeans(lbp_features, 3)
+        labels_6, _ = manual_kmeans(lbp_features, 6)
         
         plt.figure(figsize=(10, 5))
         plt.subplot(1, 2, 1)
-        plot_clusters(img_rgb, lbp_coords, kmeans_lbp_3.labels_, 3, "LBP Clusters")
+        plot_clusters(img_rgb, lbp_coords, labels_3, 3, "LBP Clusters")
         plt.subplot(1, 2, 2)
-        plot_clusters(img_rgb, lbp_coords, kmeans_lbp_6.labels_, 6, "LBP Clusters")
-        plt.suptitle("LBP Clustering")
+        plot_clusters(img_rgb, lbp_coords, labels_6, 6, "LBP Clusters")
+        plt.suptitle("LBP Clustering (Manual)")
         plt.savefig('lbp_clusters.png')
         print("Saved lbp_clusters.png")
-        
-    # BoW (Bag of Words) usually implies *using* the clusters (visual words) to represent image.
-    # Since we just clustered SIFT/HoG/LBP, we effectively created Visual Words for this single image.
-    # The prompt says "Extract ... BoW ... and do clustering". This is slightly confusing.
-    # It might mean "Create BoW representation of patches and cluster those representations".
-    # Which is effectively what we did for LBP (histogram of patches) and HoG (descriptor of patches).
-    # We will assume the above covers the intent.
     
     print("Done.")
 

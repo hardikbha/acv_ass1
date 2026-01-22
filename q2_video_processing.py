@@ -2,6 +2,57 @@
 import cv2
 import argparse
 import os
+import numpy as np
+
+def manual_resize(img, new_width, new_height):
+    """
+    Manual bilinear interpolation resize using NumPy.
+    """
+    old_height, old_width = img.shape[:2]
+    
+    # Handle both grayscale and color images
+    if len(img.shape) == 3:
+        channels = img.shape[2]
+        resized = np.zeros((new_height, new_width, channels), dtype=np.uint8)
+    else:
+        resized = np.zeros((new_height, new_width), dtype=np.uint8)
+    
+    # Scale factors
+    x_ratio = old_width / new_width
+    y_ratio = old_height / new_height
+    
+    for i in range(new_height):
+        for j in range(new_width):
+            # Find corresponding position in original image
+            x = j * x_ratio
+            y = i * y_ratio
+            
+            # Get the four nearest pixels
+            x0 = int(x)
+            y0 = int(y)
+            x1 = min(x0 + 1, old_width - 1)
+            y1 = min(y0 + 1, old_height - 1)
+            
+            # Bilinear interpolation weights
+            x_diff = x - x0
+            y_diff = y - y0
+            
+            if len(img.shape) == 3:
+                for c in range(channels):
+                    # Bilinear interpolation formula
+                    val = (img[y0, x0, c] * (1 - x_diff) * (1 - y_diff) +
+                           img[y0, x1, c] * x_diff * (1 - y_diff) +
+                           img[y1, x0, c] * (1 - x_diff) * y_diff +
+                           img[y1, x1, c] * x_diff * y_diff)
+                    resized[i, j, c] = int(val)
+            else:
+                val = (img[y0, x0] * (1 - x_diff) * (1 - y_diff) +
+                       img[y0, x1] * x_diff * (1 - y_diff) +
+                       img[y1, x0] * (1 - x_diff) * y_diff +
+                       img[y1, x1] * x_diff * y_diff)
+                resized[i, j] = int(val)
+    
+    return resized
 
 def main():
     parser = argparse.ArgumentParser(description='Video Processing Task')
@@ -39,12 +90,10 @@ def main():
         if not ret:
             break
         
-        # Check if this frame should be processed (1-based index or 0-based index? "every kth frame" usually means k, 2k, 3k...)
-        # Let's say frame 0 is the 1st frame. So if k=10, we want 9, 19, 29... or 0, 10, 20...
-        # Let's use 0-indexed count divisible by k.
+        # Check if this frame should be processed
         if frame_count % k == 0:
-            # Rescale to 256x256
-            resized_frame = cv2.resize(frame, (256, 256))
+            # Manual resize to 256x256
+            resized_frame = manual_resize(frame, 256, 256)
             
             # Save frame
             output_filename = os.path.join(output_dir, f"{frame_count}.JPG")

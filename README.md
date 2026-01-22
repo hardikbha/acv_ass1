@@ -1,6 +1,10 @@
 # ACV Assignment 1 - Warm-up
 
+**Roll Number:** D25092  
+**Email:** d25092@students.iitmandi.ac.in
+
 Python scripts for CS673 Advanced Computer Vision Assignment 1.
+
 
 ## Files
 
