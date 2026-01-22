@@ -1,0 +1,20 @@
+# Data files (large)
+mnist_png/
+imagenet_images/
+frames_v_BrushingTeeth_g01_c01/
+*.avi
+*.csv
+train.csv
+test.csv
+
+# Generated outputs (can regenerate)
+*.JPG
+tsne_plot.png
+sift_clusters.png
+hog_clusters.png
+lbp_clusters.png
+
+# System files
+.DS_Store
+__pycache__/
+*.pyc
