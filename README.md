@@ -33,7 +33,12 @@ python3 q3_mnist_analysis.py
 python3 q4_feature_clustering.py
 ```
 
-## Data (not included in repo)
-- `imagenet_images/` - Sample ImageNet images
-- `mnist_png/` - MNIST dataset in PNG format
+## Data
+
+**Included in repo:**
+- `imagenet_images/` - Sample ImageNet images (6 images)
 - `v_BrushingTeeth_g01_c01.avi` - UCF101 video sample
+- `frames_v_BrushingTeeth_g01_c01/` - Extracted video frames
+
+**Not included (too large - 547MB):**
+- `mnist_png/` - Download from [Kaggle MNIST PNG](https://www.kaggle.com/datasets/playlist/mnistzip) or extract from original MNIST
